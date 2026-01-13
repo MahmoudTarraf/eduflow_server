@@ -11,7 +11,7 @@
     "seed-badges": "node scripts/seedBadges.js"
   },
   "dependencies": {
-    "axios": "^1.6.0",  // make sure this exists
+    "axios": "^1.6.0",  
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^1.4.1",
     "bcryptjs": "^2.4.3",
