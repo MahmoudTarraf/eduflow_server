@@ -8,6 +8,8 @@ const helmet = require('helmet');
 const { initTransporter } = require('./utils/sendEmail.js');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const fs = require('fs');
+const { sendEmail } = require('./utils/sendEmail.js');
 require('dotenv').config();
 const cookieParser = require('cookie-parser');
 // SECURITY: Run configuration sanity checks in development to catch unsafe defaults early.
@@ -483,54 +485,76 @@ server.listen(PORT, () => {
   console.log(`✅ Discount expiry scheduler active (checks every hour)`);
 
   const enableAutoBackup = process.env.ENABLE_AUTOBACKUP === 'true';
-  if (enableAutoBackup) {
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    const parsedDays = parseInt(process.env.AUTOBACKUP_TIME || '7', 10);
-    const AUTO_BACKUP_DAYS = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : 7;
+  if (!enableAutoBackup) {
+    console.log('ℹ️ Auto-backup scheduler disabled (ENABLE_AUTOBACKUP not true)');
+    return;
+  }
 
-    const runAutoBackupIfDue = async (reason) => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const parsedDays = parseInt(process.env.AUTOBACKUP_TIME || '7', 10);
+  const AUTO_BACKUP_DAYS = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : 7;
+
+  const runAutoBackupIfDue = async (reason) => {
+    try {
+      const settings = await AdminSettings.getSettings();
+      const now = Date.now();
+      const last = settings.lastAutoBackupAt ? new Date(settings.lastAutoBackupAt).getTime() : 0;
+      const diffMs = last ? now - last : Infinity;
+      const diffDays = diffMs === Infinity ? Infinity : diffMs / DAY_MS;
+
+      if (last && diffDays < AUTO_BACKUP_DAYS) {
+        console.log(`ℹ️ Auto-backup skipped (${reason}): last run ${diffDays.toFixed(2)} days ago (threshold ${AUTO_BACKUP_DAYS}d)`);
+        return;
+      }
+
+      const result = await _runScheduledFullBackup();
+
+      if (result.backupFilePath && fs.existsSync(result.backupFilePath)) {
+        const backupFilename = `backup_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`;
+        try {
+          await sendEmail({
+            email: process.env.ADMIN_EMAIL,
+            subject: `EduFlow Backup (${new Date().toISOString()})`,
+            message: 'Attached is the latest backup file.',
+            attachments: [
+              {
+                filename: backupFilename,
+                path: result.backupFilePath // sendEmail will read it as buffer
+              }
+            ]
+          });
+          console.log('📧 Backup email sent successfully.');
+        } catch (emailErr) {
+          console.error('⚠️ Failed to send backup email:', emailErr.message);
+        }
+      } else {
+        console.warn('⚠️ Backup file missing or invalid, skipping email.');
+      }
+
+      // Save backup metadata
+      settings.lastAutoBackupAt = new Date();
+      settings.lastAutoBackupStatus = 'success';
+      settings.lastAutoBackupSize = result.sizeBytes;
+      settings.lastAutoBackupCollections = (result.collectionNames?.length) || 0;
+      settings.lastAutoBackupError = undefined;
+      await settings.save();
+
+      console.log(`📦 Scheduled backup completed (${reason}) size=${result.sizeBytes} bytes, collections=${result.collectionNames?.length || 0}`);
+    } catch (err) {
+      console.error(`Scheduled backup failed (${reason}):`, err.message);
       try {
         const settings = await AdminSettings.getSettings();
-        const now = Date.now();
-        const last = settings.lastAutoBackupAt ? new Date(settings.lastAutoBackupAt).getTime() : 0;
-        const diffMs = last ? now - last : Infinity;
-        const diffDays = diffMs === Infinity ? Infinity : diffMs / DAY_MS;
-
-        if (last && diffDays < AUTO_BACKUP_DAYS) {
-          console.log(`ℹ️ Auto-backup skipped (${reason}): last run ${diffDays.toFixed(2)} days ago (threshold ${AUTO_BACKUP_DAYS}d)`);
-          return;
-        }
-
-        const result = await _runScheduledFullBackup();
-        settings.lastAutoBackupAt = new Date();
-        settings.lastAutoBackupStatus = 'success';
-        settings.lastAutoBackupSize = result.sizeBytes;
-        settings.lastAutoBackupCollections = (result.collectionNames && result.collectionNames.length) || 0;
-        settings.lastAutoBackupError = undefined;
+        settings.lastAutoBackupStatus = 'failed';
+        settings.lastAutoBackupError = err.message;
         await settings.save();
-
-        console.log(`📦 Scheduled backup completed (${reason}) size=${result.sizeBytes} bytes, collections=${(result.collectionNames && result.collectionNames.length) || 0}`);
-      } catch (err) {
-        console.error(`Scheduled backup failed (${reason}):`, err.message);
-        try {
-          const settings = await AdminSettings.getSettings();
-          settings.lastAutoBackupStatus = 'failed';
-          settings.lastAutoBackupError = err.message;
-          await settings.save();
-        } catch (persistErr) {
-          console.error('Failed to persist scheduled-backup failure state:', persistErr.message);
-        }
+      } catch (persistErr) {
+        console.error('Failed to persist scheduled-backup failure state:', persistErr.message);
       }
-    };
+    }
+  };
 
-    // Run once at startup (if due) and then check daily
-    runAutoBackupIfDue('startup');
-    setInterval(() => {
-      runAutoBackupIfDue('interval');
-    }, DAY_MS);
+  runAutoBackupIfDue('startup');
+  setInterval(() => runAutoBackupIfDue('interval'), DAY_MS);
 
-    console.log(`✅ Auto-backup scheduler enabled (interval=${process.env.AUTOBACKUP_TIME || '7'} days, checked daily)`);
-  } else {
-    console.log('ℹ️ Auto-backup scheduler disabled (ENABLE_AUTOBACKUP not true)');
-  }
+  console.log(`✅ Auto-backup scheduler enabled (interval=${AUTO_BACKUP_DAYS} days, checked daily)`);
 });

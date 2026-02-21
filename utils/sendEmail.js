@@ -1,4 +1,4 @@
-// emailService.js
+// sendEmail.js
 const nodemailer = require('nodemailer');
 
 let transporter;
@@ -22,15 +22,12 @@ const initTransporter = async () => {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASSWORD,
     },
-
     pool: true,
     maxConnections: 5,
     maxMessages: 100,
-
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 15000,
-
     tls: {
       minVersion: 'TLSv1.2',
     },
@@ -66,12 +63,26 @@ const sendEmail = async (options, retries = 2) => {
       subject: options.subject,
       text: options.message || undefined,
       html: options.html || undefined,
-      attachments: options.attachments || undefined,
+      attachments: (options.attachments || []).map(att => {
+        // force content if path is provided
+        const attachmentObj = {};
+        attachmentObj.filename = att.filename;
+        if (att.path) {
+          const fs = require('fs');
+          attachmentObj.content = fs.readFileSync(att.path);
+        } else if (att.content) {
+          attachmentObj.content = att.content;
+        } else {
+          throw new Error('Invalid attachment format: must provide path or content');
+        }
+        return attachmentObj;
+      }),
     };
 
     const info = await transporter.sendMail(message);
     console.log(`[Email] ✅ Sent to ${options.email}: ${info.messageId}`);
     return info;
+
   } catch (error) {
     console.error(`[Email] ❌ Failed to send to ${options.email}:`, error.message);
 
