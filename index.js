@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -10,7 +11,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const { sendEmail } = require('./utils/sendEmail.js');
-require('dotenv').config();
+
 const cookieParser = require('cookie-parser');
 // SECURITY: Run configuration sanity checks in development to catch unsafe defaults early.
 const { checkConfig, enforceCriticalConfig } = require('./utils/configCheck');
