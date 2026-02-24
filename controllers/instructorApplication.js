@@ -47,6 +47,7 @@ exports.registerInstructor = async (req, res) => {
           registrationProgress: existingApplication.registrationProgress,
           emailVerified: existingApplication.emailVerified,
           status: existingApplication.status,
+          name: existingApplication.name,
           message: 'Application in progress. Redirecting to current step...'
         });
       }
@@ -467,7 +468,7 @@ exports.saveIntroVideo = async (req, res) => {
 
     // Update application
     application.introVideoUrl = videoUrl;
-    application.registrationProgress = 4;
+    application.registrationProgress = 5;
     application.status = 'pending_review';
     await application.save();
 
