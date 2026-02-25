@@ -115,14 +115,16 @@ async function sendDocumentToTelegram(file, context = {}) {
     });
   }
 
-  if (!file || !file.path) {
-    throw buildPublicUploadError(new Error('File path missing'), { code: 'FILE_MISSING' });
+  if (!file || (!file.path && !file.buffer)) {
+    throw buildPublicUploadError(new Error('File path or buffer missing'), { code: 'FILE_MISSING' });
   }
 
   const maxBytes = getMaxTelegramUploadBytes();
   const totalBytes = typeof file.size === 'number' && file.size > 0
     ? file.size
-    : (() => {
+    : file.buffer
+      ? file.buffer.length
+      : (() => {
         try {
           return fs.statSync(file.path).size;
         } catch (_) {
@@ -273,10 +275,12 @@ async function sendDocumentToTelegram(file, context = {}) {
         err.code = 'ETIMEDOUT';
         try {
           req.destroy(err);
-        } catch (_) {}
+        } catch (_) { }
       });
 
-      const readStream = fs.createReadStream(file.path);
+      const readStream = file.buffer
+        ? (() => { const { Readable } = require('stream'); return Readable.from(file.buffer); })()
+        : fs.createReadStream(file.path);
       const progressStream = new Transform({
         transform(chunk, enc, cb) {
           uploadedBytes += chunk.length;
@@ -294,7 +298,7 @@ async function sendDocumentToTelegram(file, context = {}) {
                   percent,
                   elapsedMs: now - startedAt
                 });
-              } catch (_) {}
+              } catch (_) { }
             }
           }
 
@@ -308,10 +312,10 @@ async function sendDocumentToTelegram(file, context = {}) {
         err.code = 'UPLOAD_CANCELED';
         try {
           readStream.destroy(err);
-        } catch (_) {}
+        } catch (_) { }
         try {
           req.destroy(err);
-        } catch (_) {}
+        } catch (_) { }
         finishWithError(err);
       };
 
@@ -377,7 +381,7 @@ async function sendDocumentToTelegram(file, context = {}) {
       if (typeof context?.onProgress === 'function' && typeof totalBytes === 'number' && totalBytes > 0) {
         try {
           context.onProgress({ uploadedBytes: totalBytes, totalBytes, percent: 100, elapsedMs: Date.now() });
-        } catch (_) {}
+        } catch (_) { }
       }
 
       return result;

@@ -142,7 +142,7 @@ exports.verifyInstructorEmail = async (req, res) => {
     const { email, otp } = req.body;
 
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -211,7 +211,7 @@ exports.resendInstructorOTP = async (req, res) => {
     const { email } = req.body;
 
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -271,7 +271,7 @@ exports.generateAgreement = async (req, res) => {
     const { email, name, signature } = req.body;
 
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -294,20 +294,14 @@ exports.generateAgreement = async (req, res) => {
     const instructorCommission = settings.instructorRevenuePercentage || 70;
     const agreementText = settings.agreementText || '';
 
-    // Generate PDF
+    // Generate PDF into memory buffer (no disk writes)
     const doc = new PDFDocument({ margin: 50 });
-    const uploadsDir = path.join(__dirname, '../uploads/agreements');
-    
-    // Create uploads directory if it doesn't exist
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
+    const { PassThrough } = require('stream');
+    const pdfChunks = [];
+    const passThrough = new PassThrough();
+    passThrough.on('data', chunk => pdfChunks.push(chunk));
 
-    const fileName = `agreement_${email.replace('@', '_')}_${Date.now()}.pdf`;
-    const filePath = path.join(uploadsDir, fileName);
-    const writeStream = fs.createWriteStream(filePath);
-
-    doc.pipe(writeStream);
+    doc.pipe(passThrough);
 
     // Add logo if available
     if (settings.logoUrl) {
@@ -349,12 +343,12 @@ exports.generateAgreement = async (req, res) => {
     doc.fontSize(12).fillColor('#1F2937').text('AGREEMENT TERMS', { underline: true });
     doc.moveDown(0.5);
     doc.fontSize(11).fillColor('#000000');
-    
+
     // Replace placeholders in agreement text
     const finalAgreementText = agreementText
       .replace(/{platformPercentage}/g, platformCommission)
       .replace(/{instructorPercentage}/g, instructorCommission);
-    
+
     doc.text(finalAgreementText, {
       align: 'justify',
       lineGap: 3
@@ -404,7 +398,7 @@ exports.generateAgreement = async (req, res) => {
     doc.text(`Platform Email: ${platformEmail || 'N/A'}`);
     doc.text('This agreement is electronically issued by the platform and considered signed by the authorized representative.');
     doc.moveDown(2);
-    
+
     // Footer
     doc.fontSize(9).fillColor('#6B7280').text(
       'This is a legally binding agreement. By signing, you accept all terms and conditions.',
@@ -413,14 +407,105 @@ exports.generateAgreement = async (req, res) => {
 
     doc.end();
 
-    // Wait for PDF to finish writing
+    // Wait for PDF buffer to complete (no disk writes)
     await new Promise((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
+      passThrough.on('end', resolve);
+      passThrough.on('error', reject);
     });
+    const pdfBuffer = Buffer.concat(pdfChunks);
 
-    // Store relative path in database, construct full URL when needed
-    const pdfUrl = constructUploadPath('agreements', fileName);
+    // Upload PDF to Telegram (or local fallback based on env)
+    const fileName = `agreement_${email.replace('@', '_')}_${Date.now()}.pdf`;
+    const { getFileProvider } = require('../services/storage');
+    const { type: fileProviderType, service: fileService } = getFileProvider();
+
+    // Check if we need to track progress for the PDF upload
+    const uploadSessionId = req.body?.uploadSessionId;
+    const shouldTrackHostedProgress = fileProviderType === 'telegram' && Boolean(uploadSessionId);
+    const totalBytes = pdfBuffer.length;
+    const abortController = shouldTrackHostedProgress && typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null;
+    let jobId = null;
+
+    if (shouldTrackHostedProgress) {
+      const { createJob, updateJob, attachJobRuntime, getJob } = require('../services/videoUploadJobs');
+      jobId = String(uploadSessionId);
+
+      try {
+        createJob({ id: jobId, ownerId: application._id.toString(), totalBytes, replaceIfExists: true });
+      } catch (e) {
+        if (e?.code === 'UPLOAD_SESSION_CANCELED') {
+          return res.status(499).json({ success: false, message: 'Upload canceled' });
+        }
+        throw e;
+      }
+
+      updateJob(jobId, {
+        status: 'uploading',
+        percent: 0,
+        bytesUploaded: 0,
+        totalBytes
+      });
+
+      attachJobRuntime(jobId, {
+        abortController,
+        cleanup: async () => { } // Nothing to clean up since it's a buffer
+      });
+
+      const job = getJob(jobId);
+      if (job?.status === 'canceled' || job?.status === 'canceling' || job?.canceled) {
+        return res.status(499).json({ success: false, message: 'Upload canceled' });
+      }
+    }
+
+    let pdfUrl;
+    if (fileProviderType === 'telegram') {
+      const telegramResult = await fileService.uploadLessonFile({
+        buffer: pdfBuffer,
+        originalname: fileName,
+        mimetype: 'application/pdf',
+        size: pdfBuffer.length
+      }, {
+        userId: null,
+        abortSignal: abortController?.signal,
+        onProgress: shouldTrackHostedProgress
+          ? ({ uploadedBytes, totalBytes: tb, percent }) => {
+            const { updateJob } = require('../services/videoUploadJobs');
+            updateJob(jobId, {
+              status: 'uploading',
+              bytesUploaded: uploadedBytes,
+              totalBytes: tb || totalBytes,
+              percent
+            });
+          }
+          : undefined
+      });
+
+      if (shouldTrackHostedProgress) {
+        const { updateJob } = require('../services/videoUploadJobs');
+        updateJob(jobId, {
+          status: 'processing',
+          percent: 100,
+          bytesUploaded: totalBytes,
+          totalBytes
+        });
+      }
+
+      // Store Telegram file_id so the PDF can be streamed later
+      pdfUrl = telegramResult.telegramFileId || telegramResult.storedName || fileName;
+      console.log(`[AgreementPDF] Uploaded to Telegram: fileId=${pdfUrl}`);
+    } else {
+      // Fallback: write to disk only if local storage is explicitly enabled
+      if (process.env.USE_LOCAL_STORAGE !== 'true') {
+        console.error('[UPLOAD-GUARD] ❌ Agreement PDF reached local fallback but USE_LOCAL_STORAGE=false');
+      }
+      const uploadsDir = path.join(__dirname, '../uploads/agreements');
+      if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+      const filePath = path.join(uploadsDir, fileName);
+      fs.writeFileSync(filePath, pdfBuffer);
+      pdfUrl = constructUploadPath('agreements', fileName);
+    }
 
     // Update application
     application.agreementPdfUrl = pdfUrl;
@@ -451,7 +536,7 @@ exports.saveIntroVideo = async (req, res) => {
     const { email, videoUrl } = req.body;
 
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -554,7 +639,7 @@ exports.getPendingApplications = async (req, res) => {
 exports.approveApplication = async (req, res) => {
   try {
     const application = await InstructorApplication.findById(req.params.id);
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -582,13 +667,13 @@ exports.approveApplication = async (req, res) => {
     const InstructorAgreement = require('../models/InstructorAgreement');
     const fs = require('fs');
     const path = require('path');
-    
+
     // Check if video file exists and prepare video data with all required fields
     let introductionVideoData = null;
     if (application.introVideoUrl) {
       const videoFilename = application.introVideoUrl.split('/').pop();
       const videoPath = path.join(__dirname, '..', application.introVideoUrl);
-      
+
       // Get file stats if file exists
       let fileSize = 0;
       try {
@@ -603,7 +688,7 @@ exports.approveApplication = async (req, res) => {
         console.log('Could not get video file size:', err.message);
         fileSize = 10485760; // 10MB default
       }
-      
+
       introductionVideoData = {
         originalName: videoFilename,
         storedName: videoFilename,
@@ -613,7 +698,7 @@ exports.approveApplication = async (req, res) => {
         uploadedAt: new Date()
       };
     }
-    
+
     // Snapshot the percentages at approval time so they can be used as last agreed terms
     const currentSettings = await AdminSettings.getSettings();
     const currentInstructorPct = currentSettings?.instructorRevenuePercentage ?? 70;
@@ -626,12 +711,12 @@ exports.approveApplication = async (req, res) => {
       status: 'approved', // Must be 'pending', 'approved', or 'rejected'
       reviewedAt: new Date()
     };
-    
+
     // Only add introductionVideo if we have video data
     if (introductionVideoData) {
       agreementData.introductionVideo = introductionVideoData;
     }
-    
+
     await InstructorAgreement.create(agreementData);
 
     // Update application with user reference
@@ -645,7 +730,7 @@ exports.approveApplication = async (req, res) => {
     try {
       const fs = require('fs');
       const path = require('path');
-      
+
       const emailOptions = {
         email: application.email,
         subject: 'Congratulations! Your Instructor Application Approved - EduFlow',
@@ -663,7 +748,7 @@ exports.approveApplication = async (req, res) => {
           <p>Best regards,<br>EduFlow Team</p>
         `
       };
-      
+
       // Attach PDF agreement if available
       if (application.agreementPdfUrl) {
         const pdfPath = path.join(__dirname, '..', application.agreementPdfUrl);
@@ -676,7 +761,7 @@ exports.approveApplication = async (req, res) => {
           ];
         }
       }
-      
+
       await sendEmail(emailOptions);
     } catch (emailError) {
       console.error('Failed to send approval email:', emailError);
@@ -710,7 +795,7 @@ exports.deleteIncompleteApplication = async (req, res) => {
     }
 
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -748,7 +833,7 @@ exports.rejectApplication = async (req, res) => {
   try {
     const { reason } = req.body;
     const application = await InstructorApplication.findById(req.params.id);
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
@@ -810,41 +895,136 @@ exports.rejectApplication = async (req, res) => {
 exports.uploadIntroVideo = async (req, res) => {
   try {
     const { email } = req.body;
-    
+
     if (!email) {
       return res.status(400).json({
         success: false,
         message: 'Email is required'
       });
     }
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
         message: 'Video file is required'
       });
     }
-    
+
     // Find the application
     const application = await InstructorApplication.findOne({ email });
-    
+
     if (!application) {
       return res.status(404).json({
         success: false,
         message: 'Application not found'
       });
     }
-    
-    // Save video URL (relative path from server root)
-    const videoUrl = `/uploads/instructor-videos/${req.file.filename}`;
-    application.introVideoUrl = videoUrl;
+
+    // Safety guard: check for accidental disk writes
+    if (process.env.USE_LOCAL_STORAGE !== 'true' && req.file?.path) {
+      console.error('[UPLOAD-GUARD] ❌ Video file hit disk but USE_LOCAL_STORAGE=false — check multer config!');
+    }
+
+    // Upload to YouTube via the configured video provider
+    const { getVideoProvider } = require('../services/storage');
+    const { type: providerType, service: videoService } = getVideoProvider();
+    let introVideoUrl;
+
+    // Check if we need to track progress
+    const uploadSessionId = req.body?.uploadSessionId;
+    const shouldTrackHostedProgress = providerType === 'youtube' && Boolean(uploadSessionId);
+    const totalBytes = typeof req.file?.size === 'number' ? req.file.size : null;
+    const abortController = shouldTrackHostedProgress && typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null;
+    let jobId = null;
+
+    if (shouldTrackHostedProgress) {
+      const { createJob, updateJob, attachJobRuntime, getJob } = require('../services/videoUploadJobs');
+      const fs = require('fs').promises;
+      jobId = String(uploadSessionId);
+
+      try {
+        createJob({ id: jobId, ownerId: application._id.toString(), totalBytes, replaceIfExists: true });
+      } catch (e) {
+        if (e?.code === 'UPLOAD_SESSION_CANCELED') {
+          if (req.file?.path) await fs.unlink(req.file.path).catch(() => { });
+          return res.status(499).json({ success: false, message: 'Upload canceled' });
+        }
+        throw e;
+      }
+
+      updateJob(jobId, {
+        status: 'uploading',
+        percent: 0,
+        bytesUploaded: 0,
+        totalBytes
+      });
+
+      attachJobRuntime(jobId, {
+        abortController,
+        cleanup: async () => {
+          if (req.file?.path) await fs.unlink(req.file.path).catch(() => { });
+        }
+      });
+
+      const job = getJob(jobId);
+      if (job?.status === 'canceled' || job?.status === 'canceling' || job?.canceled) {
+        if (req.file?.path) await fs.unlink(req.file.path).catch(() => { });
+        return res.status(499).json({ success: false, message: 'Upload canceled' });
+      }
+    }
+
+    if (providerType === 'youtube') {
+      console.log(`[VideoUpload] Uploading registration intro video to YouTube for ${email}`);
+      const uploaded = await videoService.uploadLessonVideo(req.file, {
+        title: `${application.name || email} - Instructor Introduction`,
+        description: `Introduction video for instructor registration: ${application.name || email}`,
+        privacyStatus: 'unlisted',
+        abortSignal: abortController?.signal,
+        onProgress: shouldTrackHostedProgress
+          ? ({ uploadedBytes, totalBytes: tb, percent }) => {
+            const { updateJob } = require('../services/videoUploadJobs');
+            updateJob(jobId, {
+              status: 'uploading',
+              bytesUploaded: uploadedBytes,
+              totalBytes: tb || totalBytes,
+              percent
+            });
+          }
+          : undefined
+      });
+
+      if (shouldTrackHostedProgress) {
+        const { updateJob } = require('../services/videoUploadJobs');
+        updateJob(jobId, {
+          status: 'processing',
+          percent: 100,
+          bytesUploaded: totalBytes,
+          totalBytes
+        });
+      }
+
+      introVideoUrl = uploaded.youtubeUrl || uploaded.url;
+      application.introVideoUrl = introVideoUrl;
+      application.introVideoStorageType = 'youtube';
+      application.introVideoId = uploaded.youtubeVideoId || uploaded.videoId;
+      console.log(`[VideoUpload] ✅ YouTube upload complete for ${email}: ${introVideoUrl}`);
+    } else {
+      // Local fallback — should not happen when USE_LOCAL_STORAGE=false
+      if (process.env.USE_LOCAL_STORAGE !== 'true') {
+        console.error('[UPLOAD-GUARD] ❌ Video reached local storage fallback but USE_LOCAL_STORAGE=false');
+      }
+      introVideoUrl = `/uploads/instructor-videos/${req.file.filename}`;
+      application.introVideoUrl = introVideoUrl;
+    }
     await application.save();
-    
-    console.log(`[VideoUpload] Video uploaded for ${email}: ${videoUrl}`);
-    
+
+    console.log(`[VideoUpload] Video uploaded for ${email}: ${introVideoUrl}`);
+
     res.json({
       success: true,
-      videoUrl,
+      videoUrl: introVideoUrl,
       message: 'Video uploaded successfully'
     });
   } catch (error) {

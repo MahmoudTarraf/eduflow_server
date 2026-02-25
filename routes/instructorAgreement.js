@@ -14,39 +14,15 @@ const {
   adminResetIntroVideo,
   adminResetAllIntroVideos
 } = require('../controllers/instructorAgreement');
-const multer = require('multer');
-const path = require('path');
 const scanFile = require('../middleware/scanFile');
-
-// Configure multer for video uploads
-const videoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, '../uploads/temp'));
-  },
-  filename: (req, file, cb) => {
-    cb(null, `video_${Date.now()}${path.extname(file.originalname)}`);
-  }
-});
-
-const videoUpload = multer({
-  storage: videoStorage,
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only MP4, MOV, AVI, and WEBM allowed.'));
-    }
-  }
-});
+const { uploadLectureVideo, handleDynamicUploadError } = require('../middleware/uploadDynamic');
 
 // Public route for getting agreement text
 router.get('/agreement-text', getAgreementText);
 
-// Instructor routes
-router.post('/submit-agreement', protect, authorize('instructor'), videoUpload.single('video'), scanFile, submitAgreement);
-router.put('/reupload-intro-video', protect, authorize('instructor'), videoUpload.single('video'), scanFile, reuploadIntroVideo);
+// Instructor routes — uses uploadDynamic (memoryStorage when USE_YOUTUBE=true, USE_LOCAL_STORAGE=false)
+router.post('/submit-agreement', protect, authorize('instructor'), uploadLectureVideo.single('video'), scanFile, submitAgreement, handleDynamicUploadError);
+router.put('/reupload-intro-video', protect, authorize('instructor'), uploadLectureVideo.single('video'), scanFile, reuploadIntroVideo, handleDynamicUploadError);
 
 // Admin routes
 router.get('/admin/all', protect, authorize('admin'), getAllSignupAgreements);

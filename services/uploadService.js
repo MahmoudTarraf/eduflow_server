@@ -14,7 +14,7 @@ const { ensureValidYouTubeToken } = require('./youtubeTokenService');
  */
 
 const USE_CLOUD_STORAGE = process.env.USE_CLOUD_STORAGE === 'true';
-const USE_YOUTUBE_FOR_VIDEOS = process.env.USE_YOUTUBE_FOR_VIDEOS === 'true';
+const USE_YOUTUBE_FOR_VIDEOS = process.env.USE_YOUTUBE_FOR_VIDEOS === 'true' || process.env.USE_YOUTUBE === 'true';
 
 /**
  * Upload file (non-video) - uses Cloudinary in production, local in development
@@ -139,7 +139,7 @@ async function deleteFileFromCloudinary(fileData, session) {
 async function uploadVideoToYouTube(file, metadata, userId, session) {
   try {
     const tokenDoc = await ensureValidYouTubeToken();
-    
+
     setCredentials({
       access_token: tokenDoc.accessToken,
       refresh_token: tokenDoc.refreshToken
@@ -164,10 +164,10 @@ async function uploadVideoToYouTube(file, metadata, userId, session) {
       media: {
         body: file.buffer
           ? (() => {
-              const stream = new PassThrough();
-              stream.end(file.buffer);
-              return stream;
-            })()
+            const stream = new PassThrough();
+            stream.end(file.buffer);
+            return stream;
+          })()
           : nodeFs.createReadStream(file.path)
       }
     });
