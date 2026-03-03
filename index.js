@@ -22,6 +22,7 @@ const { _runScheduledFullBackup } = require('./controllers/adminMaintenance');
 
 const connectDB = require('./config/database');
 const secureVideoController = require('./controllers/secureVideoController');
+const home = require('./routes/home.js')
 
 // Connect to database
 connectDB();
@@ -59,11 +60,11 @@ const io = socketIO(server, {
 // Socket.IO authentication middleware
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
-  
+
   if (!token) {
     return next(new Error('Authentication error: No token provided'));
   }
-  
+
   try {
     const secret = process.env.JWT_SECRET || (process.env.NODE_ENV !== 'production' ? 'development-insecure-secret' : null);
 
@@ -84,32 +85,32 @@ io.use((socket, next) => {
 // Socket.IO connection handler
 io.on('connection', (socket) => {
   console.log(`✅ User connected: ${socket.userId} (${socket.userRole})`);
-  
+
   // Join user's personal room
   socket.join(`user:${socket.userId}`);
-  
+
   // Join admin room if admin or instructor
   if (socket.userRole === 'admin' || socket.userRole === 'instructor') {
     socket.join('admin');
   }
-  
+
   // Handle joining group rooms
   socket.on('join_group', (groupId) => {
     socket.join(`group:${groupId}`);
     console.log(`User ${socket.userId} joined group ${groupId}`);
   });
-  
+
   // Handle leaving group rooms
   socket.on('leave_group', (groupId) => {
     socket.leave(`group:${groupId}`);
     console.log(`User ${socket.userId} left group ${groupId}`);
   });
-  
+
   // Handle sending messages
   socket.on('send_message', async (data) => {
     try {
       const Message = require('./models/Message');
-      
+
       // Create message in database
       const message = await Message.create({
         sender: socket.userId,
@@ -120,9 +121,9 @@ io.on('connection', (socket) => {
         content: data.content,
         attachments: data.attachments || []
       });
-      
+
       await message.populate('sender', 'name email avatar');
-      
+
       // Emit to recipient
       if (data.conversationType === 'direct') {
         io.to(`user:${data.recipient}`).emit('receive_message', message);
@@ -131,17 +132,17 @@ io.on('connection', (socket) => {
       } else if (data.conversationType === 'admin') {
         io.to('admin').emit('receive_message', message);
       }
-      
+
       // Confirm to sender
       socket.emit('message_sent', { success: true, message });
-      
+
       console.log(`Message sent from ${socket.userId} to ${data.recipient || data.group}`);
     } catch (error) {
       console.error('Send message error:', error);
       socket.emit('message_error', { error: error.message });
     }
   });
-  
+
   // Handle typing indicator
   socket.on('typing', (data) => {
     if (data.conversationType === 'direct') {
@@ -150,7 +151,7 @@ io.on('connection', (socket) => {
       socket.to(`group:${data.group}`).emit('user_typing', { userId: socket.userId });
     }
   });
-  
+
   // Handle stop typing
   socket.on('stop_typing', (data) => {
     if (data.conversationType === 'direct') {
@@ -159,7 +160,7 @@ io.on('connection', (socket) => {
       socket.to(`group:${data.group}`).emit('user_stop_typing', { userId: socket.userId });
     }
   });
-  
+
   // Handle disconnect
   socket.on('disconnect', () => {
     console.log(`❌ User disconnected: ${socket.userId}`);
@@ -296,7 +297,7 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) return callback(null, true);
-    
+
     if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
       callback(null, true);
     } else {
@@ -391,6 +392,8 @@ app.use('/api/secure', require('./routes/secureVideo'));
 
 // Secure HTML route for YouTube iframe (used by custom secure player)
 app.get('/secure/video/:contentId', secureVideoController.renderSecureVideoPage);
+// home endpoint
+app.get('/', home);
 
 // Bootstrap: ensure an admin account exists using environment-based credentials
 (async () => {
@@ -511,7 +514,7 @@ server.listen(PORT, () => {
       const result = await _runScheduledFullBackup();
 
       if (result.backupFilePath && fs.existsSync(result.backupFilePath)) {
-        const backupFilename = `backup_${new Date().toISOString().replace(/[:.]/g,'-')}.zip`;
+        const backupFilename = `backup_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
         try {
           await sendEmail({
             email: process.env.ADMIN_EMAIL,
