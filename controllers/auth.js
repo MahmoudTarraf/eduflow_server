@@ -141,9 +141,9 @@ exports.register = async (req, res) => {
     
     let emailSent = false;
     try {
-      // Check if email is configured
-      if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-        console.warn('[Registration] Email not configured. Verification link:', verificationUrl);
+      // Check if email is configured (MailerSend API key)
+      if (!process.env.EMAIL_API_KEY) {
+        console.warn('[Registration] Email not configured (EMAIL_API_KEY missing). Verification link:', verificationUrl);
         emailSent = false;
       } else {
         await sendEmail({
@@ -643,9 +643,9 @@ exports.forgotPassword = async (req, res) => {
     // Send OTP email
     let emailSent = false;
     try {
-      if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      if (!process.env.EMAIL_API_KEY) {
         if (process.env.NODE_ENV !== 'production') {
-          console.warn('[Forgot Password] Email not configured. OTP:', otp);
+          console.warn('[Forgot Password] Email not configured (EMAIL_API_KEY missing). OTP:', otp);
         } else {
           console.warn('[Forgot Password] Email not configured. OTP generated but not logged in production.');
         }
